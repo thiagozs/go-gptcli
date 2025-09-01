@@ -1,0 +1,18 @@
+api_key: "YOUR_API_KEY"
+default: "dev"
+profiles:
+  dev:
+    model: "gpt-5-mini"
+    system: "Você é um assistente útil. Responda de forma concisa."
+    temp: 0.0
+    base_url: ""
+    proxy: ""
+    format: "text"
+    max_tokens: 0
+
+  writer:
+    model: "gpt-4.1"
+    system: "Escreva no estilo de um artigo técnico, com clareza e exemplos." 
+    temp: 0.3
+    format: "markdown"
+    max_tokens: 800

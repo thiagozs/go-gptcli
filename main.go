@@ -439,6 +439,13 @@ func main() {
 	flags := parseFlags()
 	cfg, _ := loadConfig()
 
+	// Aviso amigável: se existir config.yaml mas não houver api_key, lembre o usuário
+	if _, err := os.Stat(configPath()); err == nil {
+		if cfg != nil && strings.TrimSpace(cfg.APIKey) == "" {
+			fmt.Fprintln(os.Stderr, "nota: config.yaml encontrado mas sem 'api_key'. Use OPENAI_API_KEY ou --api-key para fornecer a chave.")
+		}
+	}
+
 	// Resolve API key: flag > env > config
 	apiKey := strings.TrimSpace(flags.APIKey)
 	if apiKey == "" {

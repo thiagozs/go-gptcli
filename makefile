@@ -1,5 +1,3 @@
-# Simple Makefile for gptcli
-
 GO ?= go
 BIN_DIR := bin
 BIN_NAME := gptcli

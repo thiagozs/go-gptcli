@@ -14,5 +14,5 @@ RUN apk add --no-cache ca-certificates && adduser -D -h /home/app app
 USER app
 WORKDIR /home/app
 COPY --from=builder /out/gptcli /usr/local/bin/gptcli
-ENV OPENAI_API_KEY=""
+ENV OPENAI_API_KEY="${{OPENAI_API_KEY}}"
 ENTRYPOINT ["/usr/local/bin/gptcli"]
