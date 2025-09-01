@@ -110,21 +110,20 @@ Exemplo de `config.yaml`:
 api_key: "sk-..."
 default: "dev"
 profiles:
-	dev:
-		model: "gpt-5-mini"
-		system: "Você é um assistente útil."
-		temp: 0.0
-		base_url: ""
-		proxy: ""
-		format: "text"
-		max_tokens: 0
+    dev:
+        model: "gpt-5-mini"
+        system: "Você é um assistente útil."
+        temp: 0.0
+        base_url: ""
+        proxy: ""
+        format: "text"
+        max_tokens: 0
 
-	writer:
-		model: "gpt-4.1"
-		system: "Escreva no estilo de um artigo técnico."
-		temp: 0.3
-		format: "markdown"
-
+    writer:
+        model: "gpt-4.1"
+        system: "Escreva no estilo de um artigo técnico."
+        temp: 0.3
+        format: "markdown"
 ```
 
 Flags na linha de comando sobrescrevem valores do profile.
