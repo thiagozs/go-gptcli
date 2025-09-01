@@ -1,11 +1,3 @@
-// gptcli-advanced: ChatGPT CLI em Go com perfis, REPL, streaming, retry/backoff e proxy
-// Compilar:
-//   go mod init example.com/gptcli
-//   go get github.com/openai/openai-go/v2 gopkg.in/yaml.v3
-//   go build -o gptcli .
-// Uso:
-//   ./gptcli --help
-
 package main
 
 import (
