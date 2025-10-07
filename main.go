@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -71,18 +72,25 @@ func loadConfig() (*Config, error) {
 // ===================== Flags =====================
 
 type Flags struct {
-	APIKey    string
-	Model     string
-	System    string
-	Temp      float64
-	BaseURL   string
-	Proxy     string
-	Format    string
-	Profile   string
-	JSON      bool
-	NoContext bool
-	MaxTokens int64
-	Repl      bool
+	APIKey       string
+	Model        string
+	System       string
+	Temp         float64
+	BaseURL      string
+	Proxy        string
+	Format       string
+	Profile      string
+	JSON         bool
+	NoContext    bool
+	MaxTokens    int64
+	Repl         bool
+	Image        bool
+	ImageModel   string
+	ImageSize    string
+	ImageQuality string
+	ImageFormat  string
+	ImageOut     string
+	ImageCount   int
 }
 
 func parseFlags() *Flags {
@@ -90,6 +98,7 @@ func parseFlags() *Flags {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "\nUso: %s [flags] [prompt]\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "Se não houver prompt nem stdin, use --repl para o modo interativo.")
+		fmt.Fprintln(os.Stderr, "Use --image para gerar imagens a partir do prompt.")
 		fmt.Fprintln(os.Stderr, "\nFlags:")
 		flag.PrintDefaults()
 	}
@@ -106,9 +115,22 @@ func parseFlags() *Flags {
 	flag.BoolVar(&f.NoContext, "no-context", false, "não manter histórico na sessão (turno único)")
 	flag.Int64Var(&f.MaxTokens, "max-tokens", 0, "limite de tokens da resposta (0 = auto)")
 	flag.BoolVar(&f.Repl, "repl", false, "entra no modo interativo (REPL)")
+	flag.BoolVar(&f.Image, "image", false, "gera imagem em vez de texto")
+	flag.StringVar(&f.ImageModel, "image-model", "gpt-image-1", "modelo de imagem (ex: gpt-image-1, dall-e-3)")
+	flag.StringVar(&f.ImageSize, "image-size", "", "tamanho da imagem (ex: 1024x1024)")
+	flag.StringVar(&f.ImageQuality, "image-quality", "", "qualidade da imagem (auto|high|medium|low|hd etc)")
+	flag.StringVar(&f.ImageFormat, "image-format", "", "formato para gpt-image-1 (png|jpeg|webp)")
+	flag.StringVar(&f.ImageOut, "image-out", "", "arquivo ou diretório destino (default: ./gpt-image-<timestamp>.png)")
+	flag.IntVar(&f.ImageCount, "image-count", 1, "quantidade de imagens (1-10)")
 	flag.Parse()
 	if f.JSON {
 		f.Format = "json"
+	}
+	if f.ImageCount < 1 {
+		f.ImageCount = 1
+	}
+	if f.ImageCount > 10 {
+		f.ImageCount = 10
 	}
 	return f
 }
@@ -287,6 +309,248 @@ func streamOnce(ctx context.Context, client openai.Client, sess *Session,
 		return "", err
 	}
 	return built.String(), nil
+}
+
+// ===================== Image Generation =====================
+
+func promptForImagePrompt() (string, error) {
+	if isPiped() {
+		text, err := readAllStdin()
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(text) == "" {
+			return "", errors.New("stdin vazio; informe um prompt para gerar a imagem")
+		}
+		return text, nil
+	}
+	if flag.NArg() > 0 {
+		prompt := strings.TrimSpace(strings.Join(flag.Args(), " "))
+		if prompt != "" {
+			return prompt, nil
+		}
+	}
+	return "", errors.New("forneça um prompt via stdin ou argumento para gerar a imagem")
+}
+
+func generateImages(ctx context.Context, client openai.Client, prompt string, flags *Flags, proxy string) error {
+	params := openai.ImageGenerateParams{
+		Prompt: prompt,
+	}
+	if model := strings.TrimSpace(flags.ImageModel); model != "" {
+		params.Model = openai.ImageModel(model)
+	}
+	if size := strings.TrimSpace(flags.ImageSize); size != "" {
+		params.Size = openai.ImageGenerateParamsSize(size)
+	}
+	if quality := strings.TrimSpace(flags.ImageQuality); quality != "" {
+		params.Quality = openai.ImageGenerateParamsQuality(quality)
+	}
+	if format := strings.TrimSpace(flags.ImageFormat); format != "" {
+		params.OutputFormat = openai.ImageGenerateParamsOutputFormat(format)
+	}
+	if flags.ImageCount > 1 {
+		params.N = openai.Int(int64(flags.ImageCount))
+	}
+
+	resp, err := client.Images.Generate(ctx, params)
+	if err != nil {
+		return err
+	}
+	if resp == nil || len(resp.Data) == 0 {
+		return errors.New("nenhuma imagem retornada pela API")
+	}
+
+	defaultFormat := strings.TrimSpace(flags.ImageFormat)
+	if defaultFormat == "" && resp.OutputFormat != "" {
+		defaultFormat = string(resp.OutputFormat)
+	}
+	if defaultFormat == "" {
+		defaultFormat = "png"
+	}
+
+	outPaths, err := prepareImageOutputPaths(strings.TrimSpace(flags.ImageOut), defaultFormat, len(resp.Data))
+	if err != nil {
+		return err
+	}
+
+	var downloadClient *http.Client
+	for i, img := range resp.Data {
+		target := outPaths[i]
+
+		if err := ensureFileDirectory(target); err != nil {
+			return err
+		}
+
+		imgExt := defaultFormat
+		if ext := detectExtensionFromURL(img.URL); ext != "" {
+			imgExt = ext
+		}
+		currentExt := strings.TrimPrefix(strings.ToLower(filepath.Ext(target)), ".")
+		if currentExt == "" && imgExt != "" {
+			target = fmt.Sprintf("%s.%s", target, imgExt)
+		} else if imgExt != "" && currentExt != imgExt {
+			target = strings.TrimSuffix(target, filepath.Ext(target))
+			target = fmt.Sprintf("%s.%s", target, imgExt)
+		}
+
+		if err := saveGeneratedImage(ctx, img, target, proxy, &downloadClient); err != nil {
+			return fmt.Errorf("falha ao salvar imagem %d: %w", i+1, err)
+		}
+		fmt.Println("Imagem salva em", target)
+	}
+	return nil
+}
+
+func prepareImageOutputPaths(out, format string, count int) ([]string, error) {
+	if count < 1 {
+		return nil, errors.New("quantidade de imagens inválida")
+	}
+	format = strings.TrimPrefix(strings.ToLower(format), ".")
+	if format == "" {
+		format = "png"
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return defaultImagePaths(format, count), nil
+	}
+
+	if strings.HasSuffix(out, string(os.PathSeparator)) {
+		dir := strings.TrimSuffix(out, string(os.PathSeparator))
+		return imagePathsInsideDir(dir, format, count)
+	}
+
+	if info, err := os.Stat(out); err == nil {
+		if info.IsDir() {
+			return imagePathsInsideDir(out, format, count)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(out)), ".")
+	prefix := out
+	if ext != "" {
+		prefix = strings.TrimSuffix(out, filepath.Ext(out))
+		format = ext
+	}
+
+	if count == 1 {
+		if ext == "" {
+			return []string{fmt.Sprintf("%s.%s", out, format)}, nil
+		}
+		return []string{out}, nil
+	}
+
+	paths := make([]string, count)
+	for i := 0; i < count; i++ {
+		paths[i] = fmt.Sprintf("%s-%d.%s", prefix, i+1, format)
+	}
+	return paths, nil
+}
+
+func defaultImagePaths(format string, count int) []string {
+	prefix := defaultImageBasename()
+	paths := make([]string, count)
+	for i := 0; i < count; i++ {
+		name := prefix
+		if count > 1 {
+			name = fmt.Sprintf("%s-%d", prefix, i+1)
+		}
+		paths[i] = fmt.Sprintf("%s.%s", name, format)
+	}
+	return paths
+}
+
+func imagePathsInsideDir(dir, format string, count int) ([]string, error) {
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	prefix := defaultImageBasename()
+	paths := make([]string, count)
+	for i := 0; i < count; i++ {
+		name := prefix
+		if count > 1 {
+			name = fmt.Sprintf("%s-%d", prefix, i+1)
+		}
+		paths[i] = filepath.Join(dir, fmt.Sprintf("%s.%s", name, format))
+	}
+	return paths, nil
+}
+
+func defaultImageBasename() string {
+	return fmt.Sprintf("gpt-image-%s", time.Now().Format("20060102-150405"))
+}
+
+func detectExtensionFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(u.Path)), ".")
+	switch ext {
+	case "jpg":
+		return "jpeg"
+	case "jpeg", "png", "webp":
+		return ext
+	default:
+		return ""
+	}
+}
+
+func ensureFileDirectory(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "" || dir == "." || dir == string(os.PathSeparator) {
+		return nil
+	}
+	return os.MkdirAll(dir, 0o755)
+}
+
+func saveGeneratedImage(ctx context.Context, img openai.Image, path, proxy string, cache **http.Client) error {
+	if img.B64JSON != "" {
+		data, err := base64.StdEncoding.DecodeString(img.B64JSON)
+		if err != nil {
+			return fmt.Errorf("falha ao decodificar imagem base64: %w", err)
+		}
+		return os.WriteFile(path, data, 0o644)
+	}
+	if img.URL != "" {
+		client := *cache
+		if client == nil {
+			hc, err := httpClientWithProxy(proxy)
+			if err != nil {
+				return err
+			}
+			client = hc
+			*cache = hc
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, img.URL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			return fmt.Errorf("download da imagem falhou (%s): %s", resp.Status, strings.TrimSpace(string(snippet)))
+		}
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, data, 0o644)
+	}
+	return errors.New("imagem sem dados (nem base64 nem URL)")
 }
 
 // ===================== History & Transcript =====================
@@ -492,6 +756,24 @@ func main() {
 	ctx := context.Background()
 	sess := &Session{Format: strings.ToLower(format)}
 	sess.addSystem(system)
+
+	if flags.Image {
+		if flags.Repl {
+			fmt.Fprintln(os.Stderr, "--image não é compatível com --repl")
+			os.Exit(2)
+		}
+		prompt, err := promptForImagePrompt()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(2)
+		}
+		call := func() error {
+			return generateImages(ctx, client, prompt, flags, proxy)
+		}
+		must(withRetries(ctx, 4, call))
+		saveHistory("IMG: " + prompt)
+		return
+	}
 
 	// I/O modos: pipe > args > REPL/Help
 	if isPiped() {
