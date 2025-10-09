@@ -91,6 +91,11 @@ type Flags struct {
 	ImageFormat  string
 	ImageOut     string
 	ImageCount   int
+	TTS          bool
+	TTSModel     string
+	TTSVoice     string
+	TTSFormat    string
+	TTSOut       string
 }
 
 func parseFlags() *Flags {
@@ -122,6 +127,11 @@ func parseFlags() *Flags {
 	flag.StringVar(&f.ImageFormat, "image-format", "", "formato para gpt-image-1 (png|jpeg|webp)")
 	flag.StringVar(&f.ImageOut, "image-out", "", "arquivo ou diretório destino (default: ./gpt-image-<timestamp>.png)")
 	flag.IntVar(&f.ImageCount, "image-count", 1, "quantidade de imagens (1-10)")
+	flag.BoolVar(&f.TTS, "tts", false, "gera áudio a partir de texto")
+	flag.StringVar(&f.TTSModel, "tts-model", "gpt-4o-mini-tts", "modelo TTS (ex: gpt-4o-mini-tts)")
+	flag.StringVar(&f.TTSVoice, "tts-voice", "alloy", "voz TTS (ex: alloy, verse, shimmer)")
+	flag.StringVar(&f.TTSFormat, "tts-format", "mp3", "formato do áudio (mp3|wav|opus|aac|flac|pcm)")
+	flag.StringVar(&f.TTSOut, "tts-out", "", "arquivo ou diretório destino para o áudio gerado")
 	flag.Parse()
 	if f.JSON {
 		f.Format = "json"
@@ -313,14 +323,17 @@ func streamOnce(ctx context.Context, client openai.Client, sess *Session,
 
 // ===================== Image Generation =====================
 
-func promptForImagePrompt() (string, error) {
+func promptFromInputOrArgs(emptyErr, missingErr string) (string, error) {
 	if isPiped() {
 		text, err := readAllStdin()
 		if err != nil {
 			return "", err
 		}
 		if strings.TrimSpace(text) == "" {
-			return "", errors.New("stdin vazio; informe um prompt para gerar a imagem")
+			if emptyErr != "" {
+				return "", errors.New(emptyErr)
+			}
+			return "", errors.New("entrada vazia")
 		}
 		return text, nil
 	}
@@ -330,7 +343,24 @@ func promptForImagePrompt() (string, error) {
 			return prompt, nil
 		}
 	}
-	return "", errors.New("forneça um prompt via stdin ou argumento para gerar a imagem")
+	if missingErr != "" {
+		return "", errors.New(missingErr)
+	}
+	return "", errors.New("nenhum texto fornecido")
+}
+
+func promptForImagePrompt() (string, error) {
+	return promptFromInputOrArgs(
+		"stdin vazio; informe um prompt para gerar a imagem",
+		"forneça um prompt via stdin ou argumento para gerar a imagem",
+	)
+}
+
+func promptForTTSText() (string, error) {
+	return promptFromInputOrArgs(
+		"stdin vazio; informe um texto para gerar o áudio",
+		"forneça um texto via stdin ou argumento para gerar o áudio",
+	)
 }
 
 func generateImages(ctx context.Context, client openai.Client, prompt string, flags *Flags, proxy string) error {
@@ -553,6 +583,100 @@ func saveGeneratedImage(ctx context.Context, img openai.Image, path, proxy strin
 	return errors.New("imagem sem dados (nem base64 nem URL)")
 }
 
+// ===================== Text-to-Speech =====================
+
+func prepareAudioOutputPath(out, format string) (string, string, error) {
+	format = strings.TrimPrefix(strings.ToLower(format), ".")
+	if format == "" {
+		format = "mp3"
+	}
+
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return fmt.Sprintf("%s.%s", defaultAudioBasename(), format), format, nil
+	}
+
+	// treat trailing separator as directory
+	if strings.HasSuffix(out, string(os.PathSeparator)) {
+		dir := strings.TrimSuffix(out, string(os.PathSeparator))
+		if dir == "" {
+			dir = "."
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", "", err
+		}
+		return filepath.Join(dir, fmt.Sprintf("%s.%s", defaultAudioBasename(), format)), format, nil
+	}
+
+	if info, err := os.Stat(out); err == nil {
+		if info.IsDir() {
+			if err := os.MkdirAll(out, 0o755); err != nil {
+				return "", "", err
+			}
+			return filepath.Join(out, fmt.Sprintf("%s.%s", defaultAudioBasename(), format)), format, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", "", err
+	}
+
+	target := out
+	if ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(out)), "."); ext != "" {
+		format = ext
+	} else {
+		target = fmt.Sprintf("%s.%s", out, format)
+	}
+	if err := ensureFileDirectory(target); err != nil {
+		return "", "", err
+	}
+	return target, format, nil
+}
+
+func defaultAudioBasename() string {
+	return fmt.Sprintf("gpt-audio-%s", time.Now().Format("20060102-150405"))
+}
+
+func generateSpeech(ctx context.Context, client openai.Client, text string, flags *Flags) error {
+	model := strings.TrimSpace(flags.TTSModel)
+	if model == "" {
+		model = "gpt-4o-mini-tts"
+	}
+	voice := strings.TrimSpace(flags.TTSVoice)
+	if voice == "" {
+		voice = "alloy"
+	}
+	format := strings.TrimSpace(flags.TTSFormat)
+	target, finalFormat, err := prepareAudioOutputPath(flags.TTSOut, format)
+	if err != nil {
+		return err
+	}
+
+	params := openai.AudioSpeechNewParams{
+		Input: text,
+		Model: openai.SpeechModel(model),
+		Voice: openai.AudioSpeechNewParamsVoice(voice),
+	}
+	if finalFormat != "" {
+		params.ResponseFormat = openai.AudioSpeechNewParamsResponseFormat(finalFormat)
+	}
+
+	resp, err := client.Audio.Speech.New(ctx, params)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(target, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Println("Áudio salvo em", target)
+	return nil
+}
+
 // ===================== History & Transcript =====================
 
 func historyPath() string { return filepath.Join(configDir(), "history.txt") }
@@ -757,6 +881,11 @@ func main() {
 	sess := &Session{Format: strings.ToLower(format)}
 	sess.addSystem(system)
 
+	if flags.Image && flags.TTS {
+		fmt.Fprintln(os.Stderr, "--image e --tts não podem ser usados juntos")
+		os.Exit(2)
+	}
+
 	if flags.Image {
 		if flags.Repl {
 			fmt.Fprintln(os.Stderr, "--image não é compatível com --repl")
@@ -772,6 +901,24 @@ func main() {
 		}
 		must(withRetries(ctx, 4, call))
 		saveHistory("IMG: " + prompt)
+		return
+	}
+
+	if flags.TTS {
+		if flags.Repl {
+			fmt.Fprintln(os.Stderr, "--tts não é compatível com --repl")
+			os.Exit(2)
+		}
+		text, err := promptForTTSText()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(2)
+		}
+		call := func() error {
+			return generateSpeech(ctx, client, text, flags)
+		}
+		must(withRetries(ctx, 4, call))
+		saveHistory("TTS: " + text)
 		return
 	}
 

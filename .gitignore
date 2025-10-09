@@ -3,3 +3,6 @@ bin/*
 
 assets/*
 !/assets/.gitkeep
+
+.gocache
+.gomodcache
