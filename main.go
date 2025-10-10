@@ -95,6 +95,7 @@ type Flags struct {
 	TTSModel     string
 	TTSVoice     string
 	TTSFormat    string
+	TTSLanguage  string
 	TTSOut       string
 }
 
@@ -131,6 +132,7 @@ func parseFlags() *Flags {
 	flag.StringVar(&f.TTSModel, "tts-model", "gpt-4o-mini-tts", "modelo TTS (ex: gpt-4o-mini-tts)")
 	flag.StringVar(&f.TTSVoice, "tts-voice", "alloy", "voz TTS (ex: alloy, verse, shimmer)")
 	flag.StringVar(&f.TTSFormat, "tts-format", "mp3", "formato do áudio (mp3|wav|opus|aac|flac|pcm)")
+	flag.StringVar(&f.TTSLanguage, "tts-language", "pt-br", "idioma do áudio (ex: pt-br, en-us)")
 	flag.StringVar(&f.TTSOut, "tts-out", "", "arquivo ou diretório destino para o áudio gerado")
 	flag.Parse()
 	if f.JSON {
@@ -635,6 +637,26 @@ func defaultAudioBasename() string {
 	return fmt.Sprintf("gpt-audio-%s", time.Now().Format("20060102-150405"))
 }
 
+func normalizeLanguageTag(tag string) string {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return ""
+	}
+	tag = strings.ReplaceAll(tag, "_", "-")
+	parts := strings.Split(tag, "-")
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		if i == 0 {
+			parts[i] = strings.ToLower(part)
+		} else {
+			parts[i] = strings.ToUpper(part)
+		}
+	}
+	return strings.Join(parts, "-")
+}
+
 func generateSpeech(ctx context.Context, client openai.Client, text string, flags *Flags) error {
 	model := strings.TrimSpace(flags.TTSModel)
 	if model == "" {
@@ -645,6 +667,7 @@ func generateSpeech(ctx context.Context, client openai.Client, text string, flag
 		voice = "alloy"
 	}
 	format := strings.TrimSpace(flags.TTSFormat)
+	language := normalizeLanguageTag(flags.TTSLanguage)
 	target, finalFormat, err := prepareAudioOutputPath(flags.TTSOut, format)
 	if err != nil {
 		return err
@@ -657,6 +680,9 @@ func generateSpeech(ctx context.Context, client openai.Client, text string, flag
 	}
 	if finalFormat != "" {
 		params.ResponseFormat = openai.AudioSpeechNewParamsResponseFormat(finalFormat)
+	}
+	if language != "" {
+		params.Instructions = openai.String(fmt.Sprintf("Speak the text using %s.", language))
 	}
 
 	resp, err := client.Audio.Speech.New(ctx, params)
@@ -918,7 +944,15 @@ func main() {
 			return generateSpeech(ctx, client, text, flags)
 		}
 		must(withRetries(ctx, 4, call))
-		saveHistory("TTS: " + text)
+		voiceLabel := strings.TrimSpace(flags.TTSVoice)
+		if voiceLabel == "" {
+			voiceLabel = "alloy"
+		}
+		langLabel := normalizeLanguageTag(flags.TTSLanguage)
+		if langLabel == "" {
+			langLabel = "-"
+		}
+		saveHistory(fmt.Sprintf("TTS (%s, %s): %s", langLabel, voiceLabel, text))
 		return
 	}
 
